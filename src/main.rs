@@ -7,12 +7,13 @@ extern crate rpassword;
 extern crate ring;
 extern crate reqwest;
 extern crate hex;
+extern crate pbr;
 
 use hex::{FromHex, ToHex};
 
 use std::path;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, BufRead, Write, Stdout, BufReader};
 
 mod cli;
 mod crypto;
@@ -36,12 +37,64 @@ struct UploadResp {
 #[derive(Debug, Deserialize)]
 struct DownloadInitResp {
     nonce: String,
+    size: u64,
 }
 
 /// `/api/download/name` response
 #[derive(Debug, Deserialize)]
 struct ConfirmResp {
     file_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorResp {
+    error: String,
+}
+
+
+/// Check a `reqwest::Response` status, bailing if it's not successful
+macro_rules! unwrap_resp {
+    ($resp:expr) => {
+        if ! $resp.status().is_success() {
+            let err = $resp.json::<ErrorResp>()?;
+            bail!("{:?}: {:?}", $resp.status(), err.error)
+        } else {
+            $resp
+        }
+    }
+}
+
+
+/// Bytes wrapper
+///
+/// Wrapped bytes that display a progress bar while being read
+struct UploadBytes {
+    buf: Vec<u8>,
+    size: usize,
+    cursor: usize,
+    progress: pbr::ProgressBar<Stdout>,
+}
+impl UploadBytes {
+    fn new(bytes: Vec<u8>, pb: pbr::ProgressBar<Stdout>) -> Self {
+        Self {
+            size: bytes.len(),
+            buf: bytes,
+            cursor: 0,
+            progress: pb,
+        }
+    }
+}
+impl Read for UploadBytes {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let buf_len = buf.len();
+        let end = self.cursor + buf_len;
+        let end = if end > self.size { self.size } else { end };
+        let bytes_read = end - self.cursor;
+        buf[..bytes_read].clone_from_slice(&self.buf[self.cursor..end]);
+        self.cursor = end;
+        self.progress.add(bytes_read as u64);
+        Ok(bytes_read)
+    }
 }
 
 
@@ -93,35 +146,40 @@ fn upload(file_path: &path::Path) -> Result<()> {
 
     let file_hash = crypto::hash(&bytes);
     let nonce = crypto::rand_bytes(12)?;
+
+    println!("Encrypting data...");
+    let bytes = crypto::encrypt(&bytes, &nonce, &encrypt_pass_hash)?;
+    let upload_size = bytes.len();
+
     let client = reqwest::Client::new()?;
 
     println!("Initializing upload...");
     let upload_init_info = json!({
         "nonce": nonce.to_hex(),
         "file_name": &file_name,
-        "file_size": file_size,
+        "size": upload_size,
         "content_hash": file_hash.to_hex(),
         "access_password": access_pass.to_hex(),
     }).to_string();
     let url = format!("{}/api/upload/init", HOST);
-    let resp = client.post(&url)?
+    let mut resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(upload_init_info)
         .send()?;
-    let resp = resp.error_for_status()?.json::<UploadResp>()?;
-
+    let resp = unwrap_resp!(resp).json::<UploadResp>()?;
     println!("Received identification key: {}", resp.key);
-    println!("Encrypting data...");
-    let bytes = crypto::encrypt(&bytes, &nonce, &encrypt_pass_hash)?;
 
     println!("Uploading encrypted data...");
+    let mut pb = pbr::ProgressBar::new(upload_size as u64);
+    pb.set_units(pbr::Units::Bytes);
+    pb.format("[=> ]");
+    let upload_bytes = UploadBytes::new(bytes, pb);
     let url = format!("{}{}?key={}", HOST, resp.response_url, resp.key);
-    client.post(&url)?
-        .header(reqwest::header::ContentType::plaintext())
-        .body(bytes.to_hex())
-        .send()?
-        .error_for_status()?
-        .json::<serde_json::Value>()?;
+    let mut upload_resp = client.post(&url)?
+        .header(reqwest::header::ContentType::octet_stream())
+        .body(reqwest::Body::new(upload_bytes))
+        .send()?;
+    unwrap_resp!(upload_resp);
     println!("Download available at {}/#/download?key={}", HOST, resp.key);
     Ok(())
 }
@@ -139,24 +197,36 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
         "access_password": access_pass.to_hex(),
     }).to_string();
     let url = format!("{}/api/download/init", HOST);
-    let init_resp = client.post(&url)?
+    let mut init_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(download_access_params.clone())
-        .send()?
-        .error_for_status()?
-        .json::<DownloadInitResp>()?;
+        .send()?;
+    let init_resp = unwrap_resp!(init_resp).json::<DownloadInitResp>()?;
 
     println!("Downloading encrypted bytes...");
     let url = format!("{}/api/download?key={}", HOST, key);
     let mut bytes_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(download_access_params.clone())
-        .send()?
-        .error_for_status()?;
-    let mut enc_bytes = Vec::new();
-    bytes_resp.read_to_end(&mut enc_bytes)?;
+        .send()?;
+    unwrap_resp!(&mut bytes_resp);
 
-    let mut enc_bytes = Vec::from_hex(enc_bytes)?;
+    let mut pb = pbr::ProgressBar::new(init_resp.size);
+    pb.set_units(pbr::Units::Bytes);
+    pb.format("[=> ]");
+    let mut enc_bytes = Vec::with_capacity(init_resp.size as usize);
+    let mut stream = BufReader::new(bytes_resp);
+    loop {
+        let n = {
+            let buf = stream.fill_buf()?;
+            enc_bytes.extend_from_slice(&buf);
+            buf.len()
+        };
+        stream.consume(n);
+        if n == 0 { break; }
+        pb.add(n as u64);
+    }
+
     let nonce = Vec::from_hex(&init_resp.nonce)?;
 
     println!("Decrypting data...");
@@ -169,11 +239,11 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
         "hash": hash.to_hex(),
     }).to_string();
     let url = format!("{}/api/download/name", HOST);
-    let name_resp = client.post(&url)?
+    let mut name_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(confirm_params)
-        .send()?
-        .error_for_status()?.json::<ConfirmResp>()?;
+        .send()?;
+    let name_resp = unwrap_resp!(name_resp).json::<ConfirmResp>()?;
 
     let out_path = if out_path.is_dir() { out_path.join(name_resp.file_name) } else { out_path.to_owned() };
     println!("Saving decrypted bytes to: {:?}", out_path);
