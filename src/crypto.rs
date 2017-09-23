@@ -31,11 +31,12 @@ pub fn encrypt<'a>(bytes: &[u8], nonce: &[u8], pass: &[u8]) -> Result<Vec<u8>> {
     let alg = &ring::aead::AES_256_GCM;
     let key = ring::aead::SealingKey::new(alg, pass)?;
 
-    let out_suff_cap = key.algorithm().tag_len();
+    let out_suffix_tag_len = key.algorithm().tag_len();
     let mut in_out = bytes.to_vec();
-    in_out.resize(bytes.len() + out_suff_cap, 0);
+    // make sure we have enough room for the out suffix-tag
+    in_out.resize(bytes.len() + out_suffix_tag_len, 0);
 
-    let out_len = ring::aead::seal_in_place(&key, &nonce, &[], &mut in_out, out_suff_cap)?;
+    let out_len = ring::aead::seal_in_place(&key, &nonce, &[], &mut in_out, out_suffix_tag_len)?;
     in_out.truncate(out_len);
     Ok(in_out)
 }
