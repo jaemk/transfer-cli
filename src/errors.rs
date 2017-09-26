@@ -19,9 +19,9 @@ error_chain! {
             description("Path contains invalid utf8")
             display("InvalidUtf8Path Error: {}", s)
         }
-        ConfirmationError(s: String) {
-            description("Confirmation Error")
-            display("ConfirmationError: {}", s)
+        PathError(s: &'static str) {
+            description("Path Error")
+            display("PathError: {}", s)
         }
     }
 }

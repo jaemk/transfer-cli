@@ -30,7 +30,6 @@ pub const HOST: &'static str = "http://localhost:3000";
 #[derive(Debug, Deserialize)]
 struct UploadResp {
     key: String,
-    response_url: String,
 }
 
 /// `/api/download/init` response
@@ -38,6 +37,8 @@ struct UploadResp {
 struct DownloadInitResp {
     nonce: String,
     size: u64,
+    download_key: String,
+    confirm_key: String,
 }
 
 /// `/api/download/name` response
@@ -117,24 +118,24 @@ fn prompt_passwords() -> Result<(Vec<u8>, Vec<u8>)> {
 
 
 /// Try to get y/n confirmation for a prompt
-fn confirm(msg: &str) -> Result<()> {
+fn prompt(msg: &str) -> Result<String> {
     print!("{}", msg);
     std::io::stdout().flush()?;
     let mut s = String::new();
     std::io::stdin().read_line(&mut s)?;
-    let s = s.trim().to_lowercase();
-    if s != "y" { bail!(ErrorKind::ConfirmationError("Unable to confirm file overwrite".to_string())) }
-    Ok(())
+    Ok(s.trim().to_lowercase())
 }
 
 
 /// Encrypt and upload a file
-fn upload(file_path: &path::Path) -> Result<()> {
+fn upload(file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<u64>) -> Result<()> {
     let file_name = file_path.file_name()
         .and_then(std::ffi::OsStr::to_str)
         .map(String::from)
         .ok_or_else(|| ErrorKind::InvalidUtf8Path(format!("{:?}", file_path)))?;
     println!("Selected file: {:?}", file_path);
+    println!("  Download limit: {}", download_limit.map(|n| n.to_string()).unwrap_or_else(|| "Server default".to_string()));
+    println!("  Upload lifespan: {}", lifespan.map(|n| format!("{} seconds", n)).unwrap_or_else(|| "Server default".to_string()));
 
     let (access_pass, encrypt_pass_hash) = prompt_passwords()?;
 
@@ -160,6 +161,8 @@ fn upload(file_path: &path::Path) -> Result<()> {
         "size": upload_size,
         "content_hash": file_hash.to_hex(),
         "access_password": access_pass.to_hex(),
+        "download_limit": download_limit,
+        "lifespan": lifespan,
     }).to_string();
     let url = format!("{}/api/upload/init", HOST);
     let mut resp = client.post(&url)?
@@ -174,7 +177,7 @@ fn upload(file_path: &path::Path) -> Result<()> {
     pb.set_units(pbr::Units::Bytes);
     pb.format("[=> ]");
     let upload_bytes = UploadBytes::new(bytes, pb);
-    let url = format!("{}{}?key={}", HOST, resp.response_url, resp.key);
+    let url = format!("{}/api/upload?key={}", HOST, resp.key);
     let mut upload_resp = client.post(&url)?
         .header(reqwest::header::ContentType::octet_stream())
         .body(reqwest::Body::new(upload_bytes))
@@ -199,15 +202,19 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
     let url = format!("{}/api/download/init", HOST);
     let mut init_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
-        .body(download_access_params.clone())
+        .body(download_access_params)
         .send()?;
     let init_resp = unwrap_resp!(init_resp).json::<DownloadInitResp>()?;
 
     println!("Downloading encrypted bytes...");
-    let url = format!("{}/api/download?key={}", HOST, key);
+    let download_access_params = json!({
+        "key": &init_resp.download_key,
+        "access_password": access_pass.to_hex(),
+    }).to_string();
+    let url = format!("{}/api/download", HOST);
     let mut bytes_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
-        .body(download_access_params.clone())
+        .body(download_access_params)
         .send()?;
     unwrap_resp!(&mut bytes_resp);
 
@@ -235,21 +242,42 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
 
     println!("Confirming content hash and fetching file-name...");
     let confirm_params = json!({
-        "key": &key,
+        "key": &init_resp.confirm_key,
         "hash": hash.to_hex(),
     }).to_string();
-    let url = format!("{}/api/download/name", HOST);
+    let url = format!("{}/api/download/confirm", HOST);
     let mut name_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(confirm_params)
         .send()?;
     let name_resp = unwrap_resp!(name_resp).json::<ConfirmResp>()?;
 
-    let out_path = if out_path.is_dir() { out_path.join(name_resp.file_name) } else { out_path.to_owned() };
-    println!("Saving decrypted bytes to: {:?}", out_path);
-    if out_path.exists() {
-        confirm("Destination file already exists. Continue and overwrite? [y/n] ")?;
+    let mut out_path = if out_path.is_dir() { out_path.join(name_resp.file_name) } else { out_path.to_owned() };
+    let exists = out_path.exists();
+    println!("Destination file: {:?}", out_path);
+    if exists {
+        if prompt("Destination file already exists. Overwrite? [y/n] ")? != "y" {
+            println!("Looking for an available file-path since the download may no longer be available...");
+            let mut n  = 1;
+            loop {
+                let new_file_name = out_path.file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| ErrorKind::PathError("malformed filename"))?;
+                let new_file_name = format!("{}__{}", new_file_name, n);
+                let temp_out_path = out_path
+                    .parent()
+                    .ok_or_else(|| ErrorKind::PathError("path missing parent"))?
+                    .join(new_file_name);
+                if ! temp_out_path.exists() {
+                    out_path = temp_out_path;
+                    break
+                }
+                n += 1;
+            }
+        }
     }
+    println!("Saving content to: {:?}", out_path);
     let mut file = fs::File::create(out_path)?;
     file.write_all(bytes)?;
     println!("Success!");
@@ -266,7 +294,15 @@ fn run() -> Result<()> {
             if !file_path.exists() {
                 bail!("Invalid file path: {:?}", file_path)
             }
-            upload(&file_path)?;
+            let download_limit = match matches.value_of("download_limit") {
+                Some(v) => Some(v.parse::<u32>().chain_err(|| "Invalid `download_limit` value")?),
+                None => None,
+            };
+            let lifespan = match matches.value_of("lifespan") {
+                Some(v) => Some(v.parse::<u64>().chain_err(|| "Invalid `lifespan` value")?),
+                None => None,
+            };
+            upload(&file_path, download_limit, lifespan)?;
         }
         ("download", Some(matches)) => {
             let key = matches.value_of("key").unwrap();
