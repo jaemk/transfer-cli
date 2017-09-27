@@ -60,5 +60,11 @@ pub fn build_cli() -> App<'static, 'static> {
                  .takes_value(true)
                  .help("Decrypted output path. This can be a path to a file, or a path to a directory. \
                         If a directory is supplied, the original uploaded file name will be used.")))
+        .subcommand(SubCommand::with_name("delete")
+            .about("Delete an upload")
+            .arg(Arg::with_name("key")
+                 .takes_value(true)
+                 .required(true)
+                 .help("Upload key identifier")))
 }
 

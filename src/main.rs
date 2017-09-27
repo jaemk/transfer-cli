@@ -103,7 +103,7 @@ impl Read for UploadBytes {
 ///
 /// Returns `(access, encryption)` or an `Error` if either confirmation
 /// passwords do not match
-fn prompt_passwords() -> Result<(Vec<u8>, Vec<u8>)> {
+fn prompt_passwords(with_delete: bool) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
     let access_pass =           rpassword::prompt_password_stdout("Access-Password >> ")?;
     let access_pass_confirm =   rpassword::prompt_password_stdout("Access-Password (confirm) >> ")?;
     if access_pass != access_pass_confirm { bail!("Access passwords do not match!") }
@@ -113,7 +113,20 @@ fn prompt_passwords() -> Result<(Vec<u8>, Vec<u8>)> {
     let encrypt_pass_confirm =  rpassword::prompt_password_stdout("Encryption-Password (confirm) >> ")?;
     if encrypt_pass != encrypt_pass_confirm { bail!("Encryption passwords do not match!") }
     let encrypt_pass_hash = crypto::hash(encrypt_pass.as_bytes());
-    Ok((access_pass, encrypt_pass_hash))
+
+    let deletion_pass = {
+        if with_delete {
+            let pass = rpassword::prompt_password_stdout("Deletion-Password >> ")?;
+            if pass.is_empty() { None } else {
+                let confirm = rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
+                if pass != confirm { bail!("Deletion passwords do not match!") }
+                Some(crypto::hash(pass.as_bytes()))
+            }
+        } else {
+            None
+        }
+    };
+    Ok((access_pass, encrypt_pass_hash, deletion_pass))
 }
 
 
@@ -137,7 +150,7 @@ fn upload(file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<
     println!("  Download limit: {}", download_limit.map(|n| n.to_string()).unwrap_or_else(|| "Server default".to_string()));
     println!("  Upload lifespan: {}", lifespan.map(|n| format!("{} seconds", n)).unwrap_or_else(|| "Server default".to_string()));
 
-    let (access_pass, encrypt_pass_hash) = prompt_passwords()?;
+    let (access_pass, encrypt_pass_hash, deletion_pass) = prompt_passwords(true)?;
 
     println!("Loading file...");
     let mut file = fs::File::open(&file_path)?;
@@ -161,6 +174,7 @@ fn upload(file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<
         "size": upload_size,
         "content_hash": file_hash.to_hex(),
         "access_password": access_pass.to_hex(),
+        "deletion_password": deletion_pass.map(|bytes| bytes.to_hex()),
         "download_limit": download_limit,
         "lifespan": lifespan,
     }).to_string();
@@ -190,7 +204,7 @@ fn upload(file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<
 
 fn download(key: &str, out_path: &path::Path) -> Result<()> {
     println!("Downloading key: {}", key);
-    let (access_pass, encrypt_pass_hash) = prompt_passwords()?;
+    let (access_pass, encrypt_pass_hash, _) = prompt_passwords(false)?;
 
     let client = reqwest::Client::new()?;
 
@@ -285,6 +299,29 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
 }
 
 
+fn delete(key: &str) -> Result<()> {
+    println!("Deleting key: {}", key);
+    let deletion_pass =          rpassword::prompt_password_stdout("Deletion-Password >> ")?;
+    let deletion_pass_confirm =  rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
+    if deletion_pass != deletion_pass_confirm { bail!("Deletion passwords do not match!") }
+    let deletion_pass = crypto::hash(deletion_pass.as_bytes());
+
+    let client = reqwest::Client::new()?;
+
+    let delete_params = json!({
+        "key": &key,
+        "deletion_password": deletion_pass.to_hex(),
+    }).to_string();
+    let url = format!("{}/api/upload/delete", HOST);
+    let mut delete_resp = client.post(&url)?
+        .header(reqwest::header::ContentType::json())
+        .body(delete_params)
+        .send()?;
+    unwrap_resp!(delete_resp);
+    Ok(())
+}
+
+
 fn run() -> Result<()> {
     let matches = cli::build_cli().get_matches();
     match matches.subcommand() {
@@ -309,6 +346,10 @@ fn run() -> Result<()> {
             let out_path = matches.value_of("out_path").unwrap_or(".");
             let out_path = path::PathBuf::from(out_path);
             download(key, &out_path)?;
+        }
+        ("delete", Some(matches)) => {
+            let key = matches.value_of("key").unwrap();
+            delete(key)?;
         }
         _ => println!("no matches!"),
     }
