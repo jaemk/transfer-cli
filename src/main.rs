@@ -120,7 +120,7 @@ fn prompt_passwords(with_delete: bool) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u
             if pass.is_empty() { None } else {
                 let confirm = rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
                 if pass != confirm { bail!("Deletion passwords do not match!") }
-                Some(crypto::hash(pass.as_bytes()))
+                Some(pass.as_bytes().to_vec())
             }
         } else {
             None
@@ -304,13 +304,13 @@ fn delete(key: &str) -> Result<()> {
     let deletion_pass =          rpassword::prompt_password_stdout("Deletion-Password >> ")?;
     let deletion_pass_confirm =  rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
     if deletion_pass != deletion_pass_confirm { bail!("Deletion passwords do not match!") }
-    let deletion_pass = crypto::hash(deletion_pass.as_bytes());
+    let deletion_pass_bytes = deletion_pass.as_bytes().to_vec();
 
     let client = reqwest::Client::new()?;
 
     let delete_params = json!({
         "key": &key,
-        "deletion_password": deletion_pass.to_hex(),
+        "deletion_password": deletion_pass_bytes.to_hex(),
     }).to_string();
     let url = format!("{}/api/upload/delete", HOST);
     let mut delete_resp = client.post(&url)?
