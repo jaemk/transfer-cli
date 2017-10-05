@@ -53,6 +53,23 @@ struct ErrorResp {
 }
 
 
+#[derive(Debug, Deserialize)]
+struct Defaults {
+    upload_limit_bytes: u64,
+    upload_lifespan_secs_default: u64,
+    download_limit_default: Option<u32>,
+}
+
+
+fn get_server_defaults(host: &str) -> Result<Defaults> {
+    let url = format!("{}/api/upload/defaults", host);
+    let defaults = reqwest::get(&url)?
+        .error_for_status()?
+        .json::<Defaults>()?;
+    Ok(defaults)
+}
+
+
 /// Check a `reqwest::Response` status, bailing if it's not successful
 macro_rules! unwrap_resp {
     ($resp:expr) => {
@@ -140,21 +157,53 @@ fn prompt(msg: &str) -> Result<String> {
 }
 
 
+fn confirm(msg: &str) -> Result<()> {
+    let s = prompt(msg)?.trim().to_lowercase();
+    if s.is_empty() || s == "y" {
+        return Ok(());
+    }
+    bail!("Unable to confirm");
+}
+
+
 /// Encrypt and upload a file
-fn upload(file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<u64>) -> Result<()> {
+fn upload(host: &str, file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<u64>) -> Result<()> {
     let file_name = file_path.file_name()
         .and_then(std::ffi::OsStr::to_str)
         .map(String::from)
         .ok_or_else(|| ErrorKind::InvalidUtf8Path(format!("{:?}", file_path)))?;
-    println!("Selected file: {:?}", file_path);
-    println!("  Download limit: {}", download_limit.map(|n| n.to_string()).unwrap_or_else(|| "Server default".to_string()));
-    println!("  Upload lifespan: {}", lifespan.map(|n| format!("{} seconds", n)).unwrap_or_else(|| "Server default".to_string()));
+
+    let defaults = get_server_defaults(host)?;
+    println!("Server Defaults [{}]:", host);
+    println!("  Upload size limit [bytes]: {}", defaults.upload_limit_bytes);
+    println!("  Download limit: {}",
+             defaults.download_limit_default
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "Unlimited".to_string()));
+    println!("  Upload lifespan [s]: {}", defaults.upload_lifespan_secs_default);
+
+    let mut file = fs::File::open(&file_path)?;
+    let file_size = file.metadata()?.len();
+    println!("Upload Parameters");
+    println!("  Selected file: {:?}", file_path);
+    println!("  File size [bytes]: {}", file_size);
+    println!("  Download limit: {}",
+             download_limit
+                .map(|n| n.to_string())
+                .or(defaults.download_limit_default.map(|s| s.to_string()))
+                .unwrap_or_else(|| "Unlimited".to_string()));
+    println!("  Upload lifespan [s]: {} seconds",
+             lifespan
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| defaults.upload_lifespan_secs_default.to_string()));
+
+    if file_size > defaults.upload_limit_bytes {
+        bail!("Selected file is too large");
+    }
 
     let (access_pass, encrypt_pass_hash, deletion_pass) = prompt_passwords(true)?;
 
     println!("Loading file...");
-    let mut file = fs::File::open(&file_path)?;
-    let file_size = file.metadata()?.len();
     let mut bytes = Vec::with_capacity(file_size as usize);
     file.read_to_end(&mut bytes)?;
 
@@ -178,7 +227,7 @@ fn upload(file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<
         "download_limit": download_limit,
         "lifespan": lifespan,
     }).to_string();
-    let url = format!("{}/api/upload/init", HOST);
+    let url = format!("{}/api/upload/init", host);
     let mut resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(upload_init_info)
@@ -191,18 +240,18 @@ fn upload(file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<
     pb.set_units(pbr::Units::Bytes);
     pb.format("[=> ]");
     let upload_bytes = UploadBytes::new(bytes, pb);
-    let url = format!("{}/api/upload?key={}", HOST, resp.key);
+    let url = format!("{}/api/upload?key={}", host, resp.key);
     let mut upload_resp = client.post(&url)?
         .header(reqwest::header::ContentType::octet_stream())
         .body(reqwest::Body::new(upload_bytes))
         .send()?;
     unwrap_resp!(upload_resp);
-    println!("Download available at {}/#/download?key={}", HOST, resp.key);
+    println!("Download available at {}/#/download?key={}", host, resp.key);
     Ok(())
 }
 
 
-fn download(key: &str, out_path: &path::Path) -> Result<()> {
+fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     println!("Downloading key: {}", key);
     let (access_pass, encrypt_pass_hash, _) = prompt_passwords(false)?;
 
@@ -213,7 +262,7 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
         "key": &key,
         "access_password": access_pass.to_hex(),
     }).to_string();
-    let url = format!("{}/api/download/init", HOST);
+    let url = format!("{}/api/download/init", host);
     let mut init_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(download_access_params)
@@ -225,7 +274,7 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
         "key": &init_resp.download_key,
         "access_password": access_pass.to_hex(),
     }).to_string();
-    let url = format!("{}/api/download", HOST);
+    let url = format!("{}/api/download", host);
     let mut bytes_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(download_access_params)
@@ -259,7 +308,7 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
         "key": &init_resp.confirm_key,
         "hash": hash.to_hex(),
     }).to_string();
-    let url = format!("{}/api/download/confirm", HOST);
+    let url = format!("{}/api/download/confirm", host);
     let mut name_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(confirm_params)
@@ -294,12 +343,11 @@ fn download(key: &str, out_path: &path::Path) -> Result<()> {
     println!("Saving content to: {:?}", out_path);
     let mut file = fs::File::create(out_path)?;
     file.write_all(bytes)?;
-    println!("Success!");
     Ok(())
 }
 
 
-fn delete(key: &str) -> Result<()> {
+fn delete(host: &str, key: &str) -> Result<()> {
     println!("Deleting key: {}", key);
     let deletion_pass =          rpassword::prompt_password_stdout("Deletion-Password >> ")?;
     let deletion_pass_confirm =  rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
@@ -312,7 +360,7 @@ fn delete(key: &str) -> Result<()> {
         "key": &key,
         "deletion_password": deletion_pass_bytes.to_hex(),
     }).to_string();
-    let url = format!("{}/api/upload/delete", HOST);
+    let url = format!("{}/api/upload/delete", host);
     let mut delete_resp = client.post(&url)?
         .header(reqwest::header::ContentType::json())
         .body(delete_params)
@@ -339,19 +387,19 @@ fn run() -> Result<()> {
                 Some(v) => Some(v.parse::<u64>().chain_err(|| "Invalid `lifespan` value")?),
                 None => None,
             };
-            upload(&file_path, download_limit, lifespan)?;
+            upload(&host, &file_path, download_limit, lifespan)?;
         }
         ("download", Some(matches)) => {
             let key = matches.value_of("key").unwrap();
             let out_path = matches.value_of("out_path").unwrap_or(".");
             let out_path = path::PathBuf::from(out_path);
-            download(key, &out_path)?;
+            download(&host, key, &out_path)?;
         }
         ("delete", Some(matches)) => {
             let key = matches.value_of("key").unwrap();
-            delete(key)?;
+            delete(&host, key)?;
         }
-        _ => println!("no matches!"),
+        _ => eprintln!("{}: see `--help`", APP_NAME),
     }
     Ok(())
 }
