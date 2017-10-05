@@ -5,6 +5,9 @@ use std;
 use ring;
 use reqwest;
 use hex;
+#[cfg(feature="update")]
+use self_update;
+
 
 error_chain! {
     foreign_links {
@@ -13,6 +16,8 @@ error_chain! {
         RingUnspecified(ring::error::Unspecified);
         FromHex(hex::FromHexError);
         Utf8(std::str::Utf8Error);
+        EnvVar(std::env::VarError);
+        Update(self_update::errors::Error) #[cfg(feature="update")];
     }
     errors {
         InvalidUtf8Path(s: String) {

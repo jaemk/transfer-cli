@@ -8,12 +8,15 @@ extern crate ring;
 extern crate reqwest;
 extern crate hex;
 extern crate pbr;
+#[cfg(feature="update")]
+extern crate self_update;
 
 use hex::{FromHex, ToHex};
 
+use std::env;
 use std::path;
 use std::fs;
-use std::io::{Read, BufRead, Write, Stdout, BufReader};
+use std::io::{self, Read, BufRead, Write, Stdout, BufReader};
 
 mod cli;
 mod crypto;
@@ -23,7 +26,6 @@ use errors::*;
 
 pub const APP_NAME: &'static str = "Transfer";
 pub const APP_VERSION: &'static str = crate_version!();
-pub const HOST: &'static str = "http://localhost:3000";
 
 
 /// `/api/upload/init` response
@@ -372,6 +374,35 @@ fn delete(host: &str, key: &str) -> Result<()> {
 
 fn run() -> Result<()> {
     let matches = cli::build_cli().get_matches();
+    if let Some(matches) = matches.subcommand_matches("self") {
+        match matches.subcommand() {
+            ("update", Some(matches)) => {
+                update(&matches)?;
+            }
+            ("bash-completions", Some(matches)) => {
+                let mut out: Box<io::Write> = {
+                    if let Some(install_matches) = matches.subcommand_matches("install") {
+                        let install_path = install_matches.value_of("path").unwrap();
+                        let msg = format!("** Completion file will be installed at: `{}`\n** Is this Ok? [Y/n] ", install_path);
+                        confirm(&msg)?;
+                        let file = fs::File::create(install_path)?;
+                        Box::new(file)
+                    } else {
+                        Box::new(io::stdout())
+                    }
+                };
+                cli::build_cli().gen_completions_to(APP_NAME.to_lowercase(), clap::Shell::Bash, &mut out);
+                println!("** Success!");
+            }
+            _ => eprintln!("{}: see `--help`", APP_NAME),
+        }
+        return Ok(())
+    }
+
+    let host = match matches.value_of("host") {
+        Some(h) => h.to_owned(),
+        None => env::var("TRANSFER_HOST").chain_err(|| "`TRANSFER_HOST` env-var or `--host` arg is required")?,
+    };
     match matches.subcommand() {
         ("upload", Some(matches)) => {
             let file_path = matches.value_of("file_path").unwrap();
@@ -406,4 +437,40 @@ fn run() -> Result<()> {
 
 
 quick_main!(run);
+
+
+#[cfg(feature="update")]
+fn update(matches: &clap::ArgMatches) -> Result<()> {
+    let mut builder = self_update::backends::github::Update::configure()?;
+
+    builder.repo_owner("jaemk")
+        .repo_name("transfer-cli")
+        .target(&self_update::get_target()?)
+        .bin_name("transfer")
+        .show_download_progress(true)
+        .no_confirm(matches.is_present("no_confirm"))
+        .current_version(APP_VERSION);
+
+    if matches.is_present("quiet") {
+        builder.show_output(false)
+            .show_download_progress(false);
+    }
+
+    let status = builder.build()?.update()?;
+    match status {
+        self_update::Status::UpToDate(v) => {
+            println!("Already up to date [v{}]!", v);
+        }
+        self_update::Status::Updated(v) => {
+            println!("Updated to {}!", v);
+        }
+    }
+    return Ok(());
+}
+
+
+#[cfg(not(feature="update"))]
+fn update(_: &clap::ArgMatches) -> Result<()> {
+    bail!("This executable was not compiled with `self_update` features enabled via `--features update`")
+}
 
