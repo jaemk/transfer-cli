@@ -36,7 +36,8 @@ pub fn encrypt<'a>(bytes: &[u8], nonce: &[u8], pass: &[u8]) -> Result<Vec<u8>> {
     // make sure we have enough room for the out suffix-tag
     in_out.resize(bytes.len() + out_suffix_tag_len, 0);
 
-    let out_len = ring::aead::seal_in_place(&key, &nonce, &[], &mut in_out, out_suffix_tag_len)?;
+    let nonce = ring::aead::Nonce::try_assume_unique_for_key(nonce)?;
+    let out_len = ring::aead::seal_in_place(&key, nonce, ring::aead::Aad::empty(), &mut in_out, out_suffix_tag_len)?;
     in_out.truncate(out_len);
     Ok(in_out)
 }
@@ -49,7 +50,8 @@ pub fn encrypt<'a>(bytes: &[u8], nonce: &[u8], pass: &[u8]) -> Result<Vec<u8>> {
 pub fn decrypt<'a>(bytes: &'a mut [u8], nonce: &[u8], pass: &[u8]) -> Result<&'a [u8]> {
     let alg = &ring::aead::AES_256_GCM;
     let key = ring::aead::OpeningKey::new(alg, pass)?;
-    let out_slice = ring::aead::open_in_place(&key, &nonce, &[], 0, bytes)?;
+    let nonce = ring::aead::Nonce::try_assume_unique_for_key(nonce)?;
+    let out_slice = ring::aead::open_in_place(&key, nonce, ring::aead::Aad::empty(), 0, bytes)?;
     Ok(out_slice)
 }
 

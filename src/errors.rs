@@ -5,6 +5,7 @@ use std;
 use ring;
 use reqwest;
 use hex;
+use base64;
 #[cfg(feature="update")]
 use self_update;
 
@@ -16,7 +17,9 @@ error_chain! {
         RingUnspecified(ring::error::Unspecified);
         FromHex(hex::FromHexError);
         Utf8(std::str::Utf8Error);
+        Utf8String(std::string::FromUtf8Error);
         EnvVar(std::env::VarError);
+        Base64Decode(base64::DecodeError);
         Update(self_update::errors::Error) #[cfg(feature="update")];
     }
     errors {

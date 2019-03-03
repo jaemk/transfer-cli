@@ -7,6 +7,7 @@ extern crate rpassword;
 extern crate ring;
 extern crate reqwest;
 extern crate hex;
+extern crate base64;
 extern crate pbr;
 #[cfg(feature="update")]
 extern crate self_update;
@@ -46,7 +47,7 @@ struct DownloadInitResp {
 /// `/api/download/name` response
 #[derive(Debug, Deserialize)]
 struct ConfirmResp {
-    file_name: String,
+    file_name_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,23 +138,29 @@ impl Read for UploadBytes {
 ///
 /// Returns `(access, encryption)` or an `Error` if either confirmation
 /// passwords do not match
-fn prompt_passwords(with_delete: bool) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
+fn prompt_passwords(with_delete: bool, confirm: bool) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
     let access_pass =           rpassword::prompt_password_stdout("Access-Password >> ")?;
-    let access_pass_confirm =   rpassword::prompt_password_stdout("Access-Password (confirm) >> ")?;
-    if access_pass != access_pass_confirm { bail!("Access passwords do not match!") }
+    if confirm {
+        let access_pass_confirm =   rpassword::prompt_password_stdout("Access-Password (confirm) >> ")?;
+        if access_pass != access_pass_confirm { bail!("Access passwords do not match!") }
+    }
     let access_pass = access_pass.as_bytes().to_vec();
 
     let encrypt_pass =          rpassword::prompt_password_stdout("Encryption-Password >> ")?;
-    let encrypt_pass_confirm =  rpassword::prompt_password_stdout("Encryption-Password (confirm) >> ")?;
-    if encrypt_pass != encrypt_pass_confirm { bail!("Encryption passwords do not match!") }
+    if confirm {
+        let encrypt_pass_confirm =  rpassword::prompt_password_stdout("Encryption-Password (confirm) >> ")?;
+        if encrypt_pass != encrypt_pass_confirm { bail!("Encryption passwords do not match!") }
+    }
     let encrypt_pass_hash = crypto::hash(encrypt_pass.as_bytes());
 
     let deletion_pass = {
         if with_delete {
             let pass = rpassword::prompt_password_stdout("Deletion-Password >> ")?;
             if pass.is_empty() { None } else {
-                let confirm = rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
-                if pass != confirm { bail!("Deletion passwords do not match!") }
+                if confirm {
+                    let delete_confirm = rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
+                    if pass != delete_confirm { bail!("Deletion passwords do not match!") }
+                }
                 Some(pass.as_bytes().to_vec())
             }
         } else {
@@ -218,7 +225,7 @@ fn upload(host: &str, file_path: &path::Path, download_limit: Option<u32>, lifes
         bail!("Selected file is too large");
     }
 
-    let (access_pass, encrypt_pass_hash, deletion_pass) = prompt_passwords(true)?;
+    let (access_pass, encrypt_pass_hash, deletion_pass) = prompt_passwords(true, true)?;
 
     println!("Loading file...");
     let mut bytes = Vec::with_capacity(file_size as usize);
@@ -231,23 +238,22 @@ fn upload(host: &str, file_path: &path::Path, download_limit: Option<u32>, lifes
     let bytes = crypto::encrypt(&bytes, &nonce, &encrypt_pass_hash)?;
     let upload_size = bytes.len();
 
-    let client = reqwest::Client::new()?;
+    let client = reqwest::Client::new();
 
     println!("Initializing upload...");
     let upload_init_info = json!({
         "nonce": nonce.to_hex(),
-        "file_name": &file_name,
+        "file_name_hash": crypto::hash(file_name.as_bytes()).to_hex(),
         "size": upload_size,
         "content_hash": file_hash.to_hex(),
         "access_password": access_pass.to_hex(),
         "deletion_password": deletion_pass.map(|bytes| bytes.to_hex()),
         "download_limit": download_limit,
         "lifespan": lifespan,
-    }).to_string();
+    });
     let url = format!("{}/api/upload/init", host);
-    let mut resp = client.post(&url)?
-        .header(reqwest::header::ContentType::json())
-        .body(upload_init_info)
+    let mut resp = client.post(&url)
+        .json(&upload_init_info)
         .send()?;
     let resp = unwrap_resp!(resp).json::<UploadResp>()?;
     println!("Received identification key: {}", resp.key);
@@ -258,31 +264,41 @@ fn upload(host: &str, file_path: &path::Path, download_limit: Option<u32>, lifes
     pb.format("[=> ]");
     let upload_bytes = UploadBytes::new(bytes, pb);
     let url = format!("{}/api/upload?key={}", host, resp.key);
-    let mut upload_resp = client.post(&url)?
-        .header(reqwest::header::ContentType::octet_stream())
+    let mut upload_resp = client.post(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(reqwest::Body::new(upload_bytes))
         .send()?;
     unwrap_resp!(upload_resp);
-    println!("Download available at {}/#/download?key={}", host, resp.key);
+    let file_64 = base64::encode(&file_name);
+    println!("Download available at {}/#/download?key={}_{}", host, resp.key, file_64);
     Ok(())
 }
 
 
 fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
-    println!("Downloading key: {}", key);
-    let (access_pass, encrypt_pass_hash, _) = prompt_passwords(false)?;
+    let parts = key.split("_").collect::<Vec<_>>();
+    if parts.len() < 2 {
+        bail!("Provided key is missing the `_<name>` suffix")
+    } else if parts.len() > 2 {
+        bail!("Expected key with two parts separated by `_`")
+    }
 
-    let client = reqwest::Client::new()?;
+    let (key, file_64) = (parts[0], parts[1]);
+    let file_name = String::from_utf8(base64::decode(file_64)?)?;
+
+    println!("Downloading key: {}, name: {}", key, file_name);
+    let (access_pass, encrypt_pass_hash, _) = prompt_passwords(false, false)?;
+
+    let client = reqwest::Client::new();
 
     println!("Fetching metadata...");
     let download_access_params = json!({
         "key": &key,
         "access_password": access_pass.to_hex(),
-    }).to_string();
+    });
     let url = format!("{}/api/download/init", host);
-    let mut init_resp = client.post(&url)?
-        .header(reqwest::header::ContentType::json())
-        .body(download_access_params)
+    let mut init_resp = client.post(&url)
+        .json(&download_access_params)
         .send()?;
     let init_resp = unwrap_resp!(init_resp).json::<DownloadInitResp>()?;
 
@@ -290,11 +306,10 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     let download_access_params = json!({
         "key": &init_resp.download_key,
         "access_password": access_pass.to_hex(),
-    }).to_string();
+    });
     let url = format!("{}/api/download", host);
-    let mut bytes_resp = client.post(&url)?
-        .header(reqwest::header::ContentType::json())
-        .body(download_access_params)
+    let mut bytes_resp = client.post(&url)
+        .json(&download_access_params)
         .send()?;
     unwrap_resp!(&mut bytes_resp);
 
@@ -324,15 +339,18 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     let confirm_params = json!({
         "key": &init_resp.confirm_key,
         "hash": hash.to_hex(),
-    }).to_string();
+    });
     let url = format!("{}/api/download/confirm", host);
-    let mut name_resp = client.post(&url)?
-        .header(reqwest::header::ContentType::json())
-        .body(confirm_params)
+    let mut name_hash_resp = client.post(&url)
+        .json(&confirm_params)
         .send()?;
-    let name_resp = unwrap_resp!(name_resp).json::<ConfirmResp>()?;
+    let name_hash_resp = unwrap_resp!(name_hash_resp).json::<ConfirmResp>()?;
+    let file_name_hash = Vec::from_hex(&name_hash_resp.file_name_hash)?;
+    if file_name_hash != crypto::hash(file_name.as_bytes()) {
+        bail!("Confirmation error: provided file name does not match original");
+    }
 
-    let mut out_path = if out_path.is_dir() { out_path.join(name_resp.file_name) } else { out_path.to_owned() };
+    let mut out_path = if out_path.is_dir() { out_path.join(file_name) } else { out_path.to_owned() };
     let exists = out_path.exists();
     println!("Destination file: {:?}", out_path);
     if exists {
@@ -365,22 +383,29 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
 
 
 fn delete(host: &str, key: &str) -> Result<()> {
-    println!("Deleting key: {}", key);
+    let parts = key.split("_").collect::<Vec<_>>();
+    if parts.len() < 2 {
+        bail!("Provided key is missing the `_<name>` suffix")
+    } else if parts.len() > 2 {
+        bail!("Expected key with two parts separated by `_`")
+    }
+
+    let (key, file_64) = (parts[0], parts[1]);
+    let file_name = String::from_utf8(base64::decode(file_64)?)?;
+
+    println!("Deleting key: {}, file: {}", key, file_name);
     let deletion_pass =          rpassword::prompt_password_stdout("Deletion-Password >> ")?;
-    let deletion_pass_confirm =  rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
-    if deletion_pass != deletion_pass_confirm { bail!("Deletion passwords do not match!") }
     let deletion_pass_bytes = deletion_pass.as_bytes().to_vec();
 
-    let client = reqwest::Client::new()?;
+    let client = reqwest::Client::new();
 
     let delete_params = json!({
         "key": &key,
         "deletion_password": deletion_pass_bytes.to_hex(),
-    }).to_string();
+    });
     let url = format!("{}/api/upload/delete", host);
-    let mut delete_resp = client.post(&url)?
-        .header(reqwest::header::ContentType::json())
-        .body(delete_params)
+    let mut delete_resp = client.post(&url)
+        .json(&delete_params)
         .send()?;
     unwrap_resp!(delete_resp);
     Ok(())
