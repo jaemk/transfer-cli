@@ -18,8 +18,8 @@ Updates:
 ## Usage
 
 ```bash
-transfer upload <file>
+transfer -H https://transfer.kominick.com upload <file>
 ...
-transfer download <key>
+transfer -H https://transfer.kominick.com download <key>
 ```
 
