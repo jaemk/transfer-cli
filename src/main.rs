@@ -1,33 +1,35 @@
-#[macro_use] extern crate clap;
-#[macro_use] extern crate error_chain;
+#[macro_use]
+extern crate clap;
+#[macro_use]
+extern crate error_chain;
 extern crate serde;
-#[macro_use] extern crate serde_derive;
-#[macro_use] extern crate serde_json;
-extern crate rpassword;
-extern crate ring;
-extern crate reqwest;
-extern crate hex;
+#[macro_use]
+extern crate serde_derive;
+#[macro_use]
+extern crate serde_json;
 extern crate base64;
+extern crate hex;
 extern crate pbr;
-#[cfg(feature="update")]
+extern crate reqwest;
+extern crate ring;
+extern crate rpassword;
+#[cfg(feature = "update")]
 extern crate self_update;
 
 use hex::{FromHex, ToHex};
 
 use std::env;
-use std::path;
 use std::fs;
-use std::io::{self, Read, BufRead, Write, Stdout, BufReader};
+use std::io::{self, BufRead, BufReader, Read, Stdout, Write};
+use std::path;
 
 mod cli;
 mod crypto;
 mod errors;
-use errors::*;
-
+use crate::errors::*;
 
 pub const APP_NAME: &'static str = "Transfer";
 pub const APP_VERSION: &'static str = crate_version!();
-
 
 /// `/api/upload/init` response
 #[derive(Debug, Deserialize)]
@@ -55,7 +57,6 @@ struct ErrorResp {
     error: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct Defaults {
     upload_limit_bytes: u64,
@@ -63,32 +64,28 @@ struct Defaults {
     download_limit_default: Option<u32>,
 }
 
-
 fn get_server_defaults(host: &str) -> Result<Defaults> {
     let url = format!("{}/api/upload/defaults", host);
-    let defaults = reqwest::get(&url)?
-        .error_for_status()?
-        .json::<Defaults>()?;
+    let defaults = reqwest::get(&url)?.error_for_status()?.json::<Defaults>()?;
     Ok(defaults)
 }
-
 
 /// Check a `reqwest::Response` status, bailing if it's not successful
 macro_rules! unwrap_resp {
     ($resp:expr) => {
-        if ! $resp.status().is_success() {
+        if !$resp.status().is_success() {
             let err = $resp.json::<ErrorResp>()?;
             bail!("{:?}: {:?}", $resp.status(), err.error)
         } else {
             $resp
         }
-    }
+    };
 }
 
 /// Set ssl cert env. vars to make sure openssl can find required files
 macro_rules! set_ssl_vars {
     () => {
-        #[cfg(target_os="linux")]
+        #[cfg(target_os = "linux")]
         {
             if ::std::env::var_os("SSL_CERT_FILE").is_none() {
                 ::std::env::set_var("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
@@ -97,9 +94,8 @@ macro_rules! set_ssl_vars {
                 ::std::env::set_var("SSL_CERT_DIR", "/etc/ssl/certs");
             }
         }
-    }
+    };
 }
-
 
 /// Bytes wrapper
 ///
@@ -133,33 +129,46 @@ impl Read for UploadBytes {
     }
 }
 
-
 /// Prompt user for `access` and `encryption` passwords
 ///
 /// Returns `(access, encryption)` or an `Error` if either confirmation
 /// passwords do not match
-fn prompt_passwords(with_delete: bool, confirm: bool) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
-    let access_pass =           rpassword::prompt_password_stdout("Access-Password >> ")?;
+fn prompt_passwords(
+    with_delete: bool,
+    confirm: bool,
+) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
+    let access_pass = rpassword::prompt_password_stdout("Access-Password >> ")?;
     if confirm {
-        let access_pass_confirm =   rpassword::prompt_password_stdout("Access-Password (confirm) >> ")?;
-        if access_pass != access_pass_confirm { bail!("Access passwords do not match!") }
+        let access_pass_confirm =
+            rpassword::prompt_password_stdout("Access-Password (confirm) >> ")?;
+        if access_pass != access_pass_confirm {
+            bail!("Access passwords do not match!")
+        }
     }
     let access_pass = access_pass.as_bytes().to_vec();
 
-    let encrypt_pass =          rpassword::prompt_password_stdout("Encryption-Password >> ")?;
+    let encrypt_pass = rpassword::prompt_password_stdout("Encryption-Password >> ")?;
     if confirm {
-        let encrypt_pass_confirm =  rpassword::prompt_password_stdout("Encryption-Password (confirm) >> ")?;
-        if encrypt_pass != encrypt_pass_confirm { bail!("Encryption passwords do not match!") }
+        let encrypt_pass_confirm =
+            rpassword::prompt_password_stdout("Encryption-Password (confirm) >> ")?;
+        if encrypt_pass != encrypt_pass_confirm {
+            bail!("Encryption passwords do not match!")
+        }
     }
     let encrypt_pass_hash = crypto::hash(encrypt_pass.as_bytes());
 
     let deletion_pass = {
         if with_delete {
             let pass = rpassword::prompt_password_stdout("Deletion-Password >> ")?;
-            if pass.is_empty() { None } else {
+            if pass.is_empty() {
+                None
+            } else {
                 if confirm {
-                    let delete_confirm = rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
-                    if pass != delete_confirm { bail!("Deletion passwords do not match!") }
+                    let delete_confirm =
+                        rpassword::prompt_password_stdout("Deletion-Password (confirm) >> ")?;
+                    if pass != delete_confirm {
+                        bail!("Deletion passwords do not match!")
+                    }
                 }
                 Some(pass.as_bytes().to_vec())
             }
@@ -170,7 +179,6 @@ fn prompt_passwords(with_delete: bool, confirm: bool) -> Result<(Vec<u8>, Vec<u8
     Ok((access_pass, encrypt_pass_hash, deletion_pass))
 }
 
-
 /// Try to get y/n confirmation for a prompt
 fn prompt(msg: &str) -> Result<String> {
     print!("{}", msg);
@@ -180,7 +188,6 @@ fn prompt(msg: &str) -> Result<String> {
     Ok(s.trim().to_lowercase())
 }
 
-
 fn confirm(msg: &str) -> Result<()> {
     let s = prompt(msg)?.trim().to_lowercase();
     if s.is_empty() || s == "y" {
@@ -189,37 +196,55 @@ fn confirm(msg: &str) -> Result<()> {
     bail!("Unable to confirm");
 }
 
-
 /// Encrypt and upload a file
-fn upload(host: &str, file_path: &path::Path, download_limit: Option<u32>, lifespan: Option<u64>) -> Result<()> {
-    let file_name = file_path.file_name()
+fn upload(
+    host: &str,
+    file_path: &path::Path,
+    download_limit: Option<u32>,
+    lifespan: Option<u64>,
+) -> Result<()> {
+    let file_name = file_path
+        .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .map(String::from)
         .ok_or_else(|| ErrorKind::InvalidUtf8Path(format!("{:?}", file_path)))?;
 
     let defaults = get_server_defaults(host)?;
     println!("Server Defaults [{}]:", host);
-    println!("  Upload size limit [bytes]: {}", defaults.upload_limit_bytes);
-    println!("  Download limit: {}",
-             defaults.download_limit_default
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "Unlimited".to_string()));
-    println!("  Upload lifespan [s]: {}", defaults.upload_lifespan_secs_default);
+    println!(
+        "  Upload size limit [bytes]: {}",
+        defaults.upload_limit_bytes
+    );
+    println!(
+        "  Download limit: {}",
+        defaults
+            .download_limit_default
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "Unlimited".to_string())
+    );
+    println!(
+        "  Upload lifespan [s]: {}",
+        defaults.upload_lifespan_secs_default
+    );
 
     let mut file = fs::File::open(&file_path)?;
     let file_size = file.metadata()?.len();
     println!("Upload Parameters");
     println!("  Selected file: {:?}", file_path);
     println!("  File size [bytes]: {}", file_size);
-    println!("  Download limit: {}",
-             download_limit
-                .map(|n| n.to_string())
-                .or(defaults.download_limit_default.map(|s| s.to_string()))
-                .unwrap_or_else(|| "Unlimited".to_string()));
-    println!("  Upload lifespan [s]: {} seconds",
-             lifespan
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| defaults.upload_lifespan_secs_default.to_string()));
+    println!(
+        "  Download limit: {}",
+        download_limit
+            .map(|n| n.to_string())
+            .or(defaults.download_limit_default.map(|s| s.to_string()))
+            .unwrap_or_else(|| "Unlimited".to_string())
+    );
+    println!(
+        "  Upload lifespan [s]: {} seconds",
+        lifespan
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| defaults.upload_lifespan_secs_default.to_string())
+    );
 
     if file_size > defaults.upload_limit_bytes {
         bail!("Selected file is too large");
@@ -238,7 +263,7 @@ fn upload(host: &str, file_path: &path::Path, download_limit: Option<u32>, lifes
     let bytes = crypto::encrypt(&bytes, &nonce, &encrypt_pass_hash)?;
     let upload_size = bytes.len();
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(None).build()?;
 
     println!("Initializing upload...");
     let upload_init_info = json!({
@@ -252,9 +277,7 @@ fn upload(host: &str, file_path: &path::Path, download_limit: Option<u32>, lifes
         "lifespan": lifespan,
     });
     let url = format!("{}/api/upload/init", host);
-    let mut resp = client.post(&url)
-        .json(&upload_init_info)
-        .send()?;
+    let mut resp = client.post(&url).json(&upload_init_info).send()?;
     let resp = unwrap_resp!(resp).json::<UploadResp>()?;
     println!("Received identification key: {}", resp.key);
 
@@ -264,16 +287,19 @@ fn upload(host: &str, file_path: &path::Path, download_limit: Option<u32>, lifes
     pb.format("[=> ]");
     let upload_bytes = UploadBytes::new(bytes, pb);
     let url = format!("{}/api/upload?key={}", host, resp.key);
-    let mut upload_resp = client.post(&url)
+    let mut upload_resp = client
+        .post(&url)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(reqwest::Body::new(upload_bytes))
         .send()?;
     unwrap_resp!(upload_resp);
     let file_64 = base64::encode(&file_name);
-    println!("Download available at {}/#/download?key={}_{}", host, resp.key, file_64);
+    println!(
+        "Download available at {}/#/download?key={}_{}",
+        host, resp.key, file_64
+    );
     Ok(())
 }
-
 
 fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     let parts = key.split("_").collect::<Vec<_>>();
@@ -297,9 +323,7 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
         "access_password": access_pass.to_hex(),
     });
     let url = format!("{}/api/download/init", host);
-    let mut init_resp = client.post(&url)
-        .json(&download_access_params)
-        .send()?;
+    let mut init_resp = client.post(&url).json(&download_access_params).send()?;
     let init_resp = unwrap_resp!(init_resp).json::<DownloadInitResp>()?;
 
     println!("Downloading encrypted bytes...");
@@ -308,9 +332,7 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
         "access_password": access_pass.to_hex(),
     });
     let url = format!("{}/api/download", host);
-    let mut bytes_resp = client.post(&url)
-        .json(&download_access_params)
-        .send()?;
+    let mut bytes_resp = client.post(&url).json(&download_access_params).send()?;
     unwrap_resp!(&mut bytes_resp);
 
     let mut pb = pbr::ProgressBar::new(init_resp.size);
@@ -325,7 +347,9 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
             buf.len()
         };
         stream.consume(n);
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         pb.add(n as u64);
     }
 
@@ -341,24 +365,27 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
         "hash": hash.to_hex(),
     });
     let url = format!("{}/api/download/confirm", host);
-    let mut name_hash_resp = client.post(&url)
-        .json(&confirm_params)
-        .send()?;
+    let mut name_hash_resp = client.post(&url).json(&confirm_params).send()?;
     let name_hash_resp = unwrap_resp!(name_hash_resp).json::<ConfirmResp>()?;
     let file_name_hash = Vec::from_hex(&name_hash_resp.file_name_hash)?;
     if file_name_hash != crypto::hash(file_name.as_bytes()) {
         bail!("Confirmation error: provided file name does not match original");
     }
 
-    let mut out_path = if out_path.is_dir() { out_path.join(file_name) } else { out_path.to_owned() };
+    let mut out_path = if out_path.is_dir() {
+        out_path.join(file_name)
+    } else {
+        out_path.to_owned()
+    };
     let exists = out_path.exists();
     println!("Destination file: {:?}", out_path);
     if exists {
         if prompt("Destination file already exists. Overwrite? [y/n] ")? != "y" {
             println!("Looking for an available file-path since the download may no longer be available...");
-            let mut n  = 1;
+            let mut n = 1;
             loop {
-                let new_file_name = out_path.file_name()
+                let new_file_name = out_path
+                    .file_name()
                     .and_then(std::ffi::OsStr::to_str)
                     .map(|s| s.to_string())
                     .ok_or_else(|| ErrorKind::PathError("malformed filename"))?;
@@ -367,9 +394,9 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
                     .parent()
                     .ok_or_else(|| ErrorKind::PathError("path missing parent"))?
                     .join(new_file_name);
-                if ! temp_out_path.exists() {
+                if !temp_out_path.exists() {
                     out_path = temp_out_path;
-                    break
+                    break;
                 }
                 n += 1;
             }
@@ -380,7 +407,6 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     file.write_all(bytes)?;
     Ok(())
 }
-
 
 fn delete(host: &str, key: &str) -> Result<()> {
     let parts = key.split("_").collect::<Vec<_>>();
@@ -394,7 +420,7 @@ fn delete(host: &str, key: &str) -> Result<()> {
     let file_name = String::from_utf8(base64::decode(file_64)?)?;
 
     println!("Deleting key: {}, file: {}", key, file_name);
-    let deletion_pass =          rpassword::prompt_password_stdout("Deletion-Password >> ")?;
+    let deletion_pass = rpassword::prompt_password_stdout("Deletion-Password >> ")?;
     let deletion_pass_bytes = deletion_pass.as_bytes().to_vec();
 
     let client = reqwest::Client::new();
@@ -404,13 +430,10 @@ fn delete(host: &str, key: &str) -> Result<()> {
         "deletion_password": deletion_pass_bytes.to_hex(),
     });
     let url = format!("{}/api/upload/delete", host);
-    let mut delete_resp = client.post(&url)
-        .json(&delete_params)
-        .send()?;
+    let mut delete_resp = client.post(&url).json(&delete_params).send()?;
     unwrap_resp!(delete_resp);
     Ok(())
 }
-
 
 fn run() -> Result<()> {
     set_ssl_vars!();
@@ -424,7 +447,10 @@ fn run() -> Result<()> {
                 let mut out: Box<io::Write> = {
                     if let Some(install_matches) = matches.subcommand_matches("install") {
                         let install_path = install_matches.value_of("path").unwrap();
-                        let msg = format!("** Completion file will be installed at: `{}`\n** Is this Ok? [Y/n] ", install_path);
+                        let msg = format!(
+                            "** Completion file will be installed at: `{}`\n** Is this Ok? [Y/n] ",
+                            install_path
+                        );
                         confirm(&msg)?;
                         let file = fs::File::create(install_path)?;
                         Box::new(file)
@@ -432,17 +458,22 @@ fn run() -> Result<()> {
                         Box::new(io::stdout())
                     }
                 };
-                cli::build_cli().gen_completions_to(APP_NAME.to_lowercase(), clap::Shell::Bash, &mut out);
+                cli::build_cli().gen_completions_to(
+                    APP_NAME.to_lowercase(),
+                    clap::Shell::Bash,
+                    &mut out,
+                );
                 println!("** Success!");
             }
             _ => eprintln!("{}: see `--help`", APP_NAME),
         }
-        return Ok(())
+        return Ok(());
     }
 
     let host = match matches.value_of("host") {
         Some(h) => h.to_owned(),
-        None => env::var("TRANSFER_HOST").chain_err(|| "`TRANSFER_HOST` env-var or `--host` arg is required")?,
+        None => env::var("TRANSFER_HOST")
+            .chain_err(|| "`TRANSFER_HOST` env-var or `--host` arg is required")?,
     };
     match matches.subcommand() {
         ("upload", Some(matches)) => {
@@ -452,7 +483,10 @@ fn run() -> Result<()> {
                 bail!("Invalid file path: {:?}", file_path)
             }
             let download_limit = match matches.value_of("download_limit") {
-                Some(v) => Some(v.parse::<u32>().chain_err(|| "Invalid `download_limit` value")?),
+                Some(v) => Some(
+                    v.parse::<u32>()
+                        .chain_err(|| "Invalid `download_limit` value")?,
+                ),
                 None => None,
             };
             let lifespan = match matches.value_of("lifespan") {
@@ -476,15 +510,14 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-
 quick_main!(run);
 
-
-#[cfg(feature="update")]
+#[cfg(feature = "update")]
 fn update(matches: &clap::ArgMatches) -> Result<()> {
     let mut builder = self_update::backends::github::Update::configure()?;
 
-    builder.repo_owner("jaemk")
+    builder
+        .repo_owner("jaemk")
         .repo_name("transfer-cli")
         .target(&self_update::get_target()?)
         .bin_name("transfer")
@@ -493,8 +526,7 @@ fn update(matches: &clap::ArgMatches) -> Result<()> {
         .current_version(APP_VERSION);
 
     if matches.is_present("quiet") {
-        builder.show_output(false)
-            .show_download_progress(false);
+        builder.show_output(false).show_download_progress(false);
     }
 
     let status = builder.build()?.update()?;
@@ -509,9 +541,7 @@ fn update(matches: &clap::ArgMatches) -> Result<()> {
     return Ok(());
 }
 
-
-#[cfg(not(feature="update"))]
+#[cfg(not(feature = "update"))]
 fn update(_: &clap::ArgMatches) -> Result<()> {
     bail!("This executable was not compiled with `self_update` features enabled via `--features update`")
 }
-
