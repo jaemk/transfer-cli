@@ -74,8 +74,13 @@ fn get_server_defaults(host: &str) -> Result<Defaults> {
 macro_rules! unwrap_resp {
     ($resp:expr) => {
         if !$resp.status().is_success() {
-            let err = $resp.text()?;
-            bail!("{:?}: {:?}", $resp.status(), err)
+            let err_msg = $resp.text()?;
+            let err_resp = serde_json::from_str::<ErrorResp>(&err_msg);
+            let err_msg = match err_resp {
+                Ok(ref err_resp) => &err_resp.error,
+                Err(_) => &err_msg,
+            };
+            bail!("{:?}: {:?}", $resp.status(), err_msg)
         } else {
             $resp
         }
