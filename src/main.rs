@@ -74,8 +74,8 @@ fn get_server_defaults(host: &str) -> Result<Defaults> {
 macro_rules! unwrap_resp {
     ($resp:expr) => {
         if !$resp.status().is_success() {
-            let err = $resp.json::<ErrorResp>()?;
-            bail!("{:?}: {:?}", $resp.status(), err.error)
+            let err = $resp.text()?;
+            bail!("{:?}: {:?}", $resp.status(), err)
         } else {
             $resp
         }
