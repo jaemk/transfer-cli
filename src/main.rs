@@ -16,7 +16,7 @@ extern crate rpassword;
 #[cfg(feature = "update")]
 extern crate self_update;
 
-use hex::{FromHex, ToHex};
+use hex::FromHex;
 
 use std::env;
 use std::fs;
@@ -267,12 +267,12 @@ fn upload(
 
     println!("Initializing upload...");
     let upload_init_info = json!({
-        "nonce": nonce.to_hex(),
-        "file_name_hash": crypto::hash(file_name.as_bytes()).to_hex(),
+        "nonce": hex::encode(nonce),
+        "file_name_hash": hex::encode(crypto::hash(file_name.as_bytes())),
         "size": upload_size,
-        "content_hash": file_hash.to_hex(),
-        "access_password": access_pass.to_hex(),
-        "deletion_password": deletion_pass.map(|bytes| bytes.to_hex()),
+        "content_hash": hex::encode(file_hash),
+        "access_password": hex::encode(access_pass),
+        "deletion_password": deletion_pass.map(|bytes| hex::encode(bytes)),
         "download_limit": download_limit,
         "lifespan": lifespan,
     });
@@ -293,10 +293,14 @@ fn upload(
         .body(reqwest::Body::new(upload_bytes))
         .send()?;
     unwrap_resp!(upload_resp);
-    let file_64 = base64::encode(&file_name);
+    let file_64 = base64::encode_config(&file_name, base64::URL_SAFE);
     println!(
-        "Download available at {}/#/download?key={}_{}",
+        "Download available at: {}/#/download?key={}_{}",
         host, resp.key, file_64
+    );
+    println!(
+        "Download command: transfer download {}_{}",
+        resp.key, file_64
     );
     Ok(())
 }
@@ -310,7 +314,7 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     }
 
     let (key, file_64) = (parts[0], parts[1]);
-    let file_name = String::from_utf8(base64::decode(file_64)?)?;
+    let file_name = String::from_utf8(base64::decode_config(file_64, base64::URL_SAFE)?)?;
 
     println!("Downloading key: {}, name: {}", key, file_name);
     let (access_pass, encrypt_pass_hash, _) = prompt_passwords(false, false)?;
@@ -320,7 +324,7 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     println!("Fetching metadata...");
     let download_access_params = json!({
         "key": &key,
-        "access_password": access_pass.to_hex(),
+        "access_password": hex::encode(&access_pass),
     });
     let url = format!("{}/api/download/init", host);
     let mut init_resp = client.post(&url).json(&download_access_params).send()?;
@@ -329,7 +333,7 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     println!("Downloading encrypted bytes...");
     let download_access_params = json!({
         "key": &init_resp.download_key,
-        "access_password": access_pass.to_hex(),
+        "access_password": hex::encode(access_pass),
     });
     let url = format!("{}/api/download", host);
     let mut bytes_resp = client.post(&url).json(&download_access_params).send()?;
@@ -362,7 +366,7 @@ fn download(host: &str, key: &str, out_path: &path::Path) -> Result<()> {
     println!("Confirming content hash and fetching file-name...");
     let confirm_params = json!({
         "key": &init_resp.confirm_key,
-        "hash": hash.to_hex(),
+        "hash": hex::encode(hash),
     });
     let url = format!("{}/api/download/confirm", host);
     let mut name_hash_resp = client.post(&url).json(&confirm_params).send()?;
@@ -417,7 +421,7 @@ fn delete(host: &str, key: &str) -> Result<()> {
     }
 
     let (key, file_64) = (parts[0], parts[1]);
-    let file_name = String::from_utf8(base64::decode(file_64)?)?;
+    let file_name = String::from_utf8(base64::decode_config(file_64, base64::URL_SAFE)?)?;
 
     println!("Deleting key: {}, file: {}", key, file_name);
     let deletion_pass = rpassword::prompt_password_stdout("Deletion-Password >> ")?;
@@ -427,7 +431,7 @@ fn delete(host: &str, key: &str) -> Result<()> {
 
     let delete_params = json!({
         "key": &key,
-        "deletion_password": deletion_pass_bytes.to_hex(),
+        "deletion_password": hex::encode(deletion_pass_bytes),
     });
     let url = format!("{}/api/upload/delete", host);
     let mut delete_resp = client.post(&url).json(&delete_params).send()?;

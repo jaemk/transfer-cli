@@ -1,6 +1,5 @@
-use clap::{Arg, App, SubCommand};
-use super::{APP_VERSION, APP_NAME};
-
+use super::{APP_NAME, APP_VERSION};
+use clap::{App, Arg, SubCommand};
 
 pub fn build_cli() -> App<'static, 'static> {
     App::new(APP_NAME)
@@ -73,4 +72,3 @@ pub fn build_cli() -> App<'static, 'static> {
                  .required(true)
                  .help("Upload key identifier")))
 }
-
