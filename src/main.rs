@@ -295,6 +295,7 @@ fn upload(
     let mut upload_resp = client
         .post(&url)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .header(reqwest::header::CONTENT_LENGTH, upload_size.to_string())
         .body(reqwest::Body::new(upload_bytes))
         .send()?;
     unwrap_resp!(upload_resp);
